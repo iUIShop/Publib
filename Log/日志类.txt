@@ -1,0 +1,90 @@
+代码见Publib\Log
+需要往日志文件打印信息的工程包含CIUILog类后，用法如下：
+#include <cguid.h>
+#include <Log/IUILog.h>
+CIUILog g_log2; // 定义全局对象
+
+	g_log2.SetMaxLogFilesize(0); // 文件尺寸无上限
+	g_log2.Open(L"C:\\1.log");
+
+	// 写日志
+	LONGLONG llData = 5;
+	g_log2.WriteA("%I64d", llData);
+	g_log2.WriteA("abc");
+
+	// 用完关闭
+	g_log2.Close();
+
+C:\1.log内容如下：
+2022-10-18 15:28:38:258	[29948][34688]	5
+2022-10-18 15:28:38:259	[29948][34688]	abc
+
+
+CIUILog多进程多线程安全。
+经过下面的代码压测：
+
+// 要使用Administrator权限运行下面的代码。否则WaitForMultipleObjects会立即返回。
+// 这是因为CIUILog内部创建的互斥是Global的。
+#include <cguid.h>
+#include <Log/IUILog.h>
+#include <vector>
+#include <atomic>
+CIUILog g_log2; // 定义全局对象
+std::atomic<LONGLONG> g_llData = 0;
+UINT __stdcall WriteLogThread(PVOID pParam)
+{
+	while (1)
+	{
+		g_llData++;
+
+		if (g_llData > 100000) // 一个进程不论多少线程，最多打印10万条日志。
+		{
+			break;
+		}
+
+		g_log2.WriteW(L"|%I64d", g_llData.load());
+		int n = 0;
+	}
+
+	return 0;
+}
+
+int main()
+{
+	// 一个模块只需Open一次。
+	g_log2.SetMaxLogFilesize(0); // 生成的日志文件大小无上限，默认是5MB
+	g_log2.Open(L"C:\\1.log");
+
+	HANDLE vHandles[MAXIMUM_WAIT_OBJECTS];
+	for (int i = 0; i < MAXIMUM_WAIT_OBJECTS; ++i)
+	{
+		HANDLE h = (HANDLE)_beginthreadex(NULL, 0, WriteLogThread, 0, 0, NULL);
+		vHandles[i] = h;
+	}
+
+	// 等待所有线程结束。一次最多只能等待64个。
+	DWORD dwWait = WaitForMultipleObjects(MAXIMUM_WAIT_OBJECTS, vHandles, TRUE, INFINITE);
+
+	// 用完关闭
+	g_log2.Close();
+
+	return 0;
+}
+
+启动一个进程，输出10万条日志测试成功。
+起10个进程，每个进程64个线程，每个进程打印10万条日志，共100万条数据压测通过。
+
+
+设计日志的技巧：
+每条日志必须包含精确到毫秒的时间；
+每条日志必须包含[进程ID]，以确保什么时候重启了进程；
+每条日志必须包含[线程ID]，通过搜索[线程ID](前后加方括号)，了解那个线程的工作流；
+日志类应使用生产者/消费者模式，因为日志写入文件是IO操作，会耗时，如果直接输出到文件，会卡住调用线程。
+每条日志应该同时调用OutputDebugStringW输出到DebugView.exe，方便实时查看日志
+日志类文件应该采用Unicode16，这样可以兼容所有语言，保证不会出现乱码。
+日志类大部分是一个进程在使用，所以为了简便，可以设计是线程安全，不需要进程安全。但要预防同一个程序的多个进程实例写入同一个日志文件，这也是多进程访问日志。
+研究循环写入日志，防止日志变得越来越大。(deepseek给出的方案是采用多日志文件方式，总日志文件变大后，把旧的日志文件删除，可以可保证日志文件的连续性)
+
+输出日志技巧
+每条日志必须包含关键词，关键词可以多个，每个关键词使用方括号括起来，例如：log(L"[Download][UI] Start download file '%s'.", szFile); 这样通过搜索[Download]就可以找到所有和下载相关的日志，通过搜索[UI]又能找到所有和UI相关的日志。
+每条日志结束必须有句号，方便确认日志是完整输出的。
